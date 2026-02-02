@@ -1,4 +1,4 @@
-name: ROM Extract to Hugging Face (Smart Download)
+name: ROM Extract to Hugging Face (High Speed)
 
 on:
   workflow_dispatch:
@@ -7,94 +7,63 @@ on:
         description: 'Link ROM (GDrive atau Direct Link)'
         required: true
       rom_name:
-        description: 'Nama Folder Output'
-        required: true
-        default: 'Samsung_A50_Android11'
-      hf_username:
-        description: 'Username Hugging Face kamu'
+        description: 'Nama Folder di HF (misal: A50-Dump)'
         required: true
       hf_repo:
-        description: 'Nama Repo Dataset Hugging Face'
+        description: 'Repo ID (contoh: username/my-dataset)'
         required: true
 
 jobs:
-  mirror-to-hf:
+  upload-to-hf:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Prepare Environment
+    - name: Free Disk Space
       run: |
-        # Bersihkan disk space
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
-        
-        # Install tools yang dibutuhkan
         sudo apt-get update
-        sudo apt-get install -y aria2 p7zip-full git-lfs python3-pip
-        
-        # Install gdown via pip
-        pip3 install gdown
-        
-        # Setup Git LFS
-        git lfs install
+        sudo apt-get install -y aria2 p7zip-full python3-pip
+        pip3 install gdown huggingface_hub
 
-    - name: Smart Download ROM
+    - name: Smart Download
       run: |
         URL="${{ inputs.rom_url }}"
-        OUTPUT="rom.zip"
-        
         if [[ "$URL" == *"drive.google.com"* ]]; then
-          echo "✅ Google Drive link detected!"
-          # Menggunakan --fuzzy agar gdown otomatis mencari ID file dari link browser
-          # Menggunakan --remaining-ok agar tidak gagal jika ada masalah koneksi sedikit
-          gdown --fuzzy "$URL" -O "$OUTPUT"
+          gdown --fuzzy "$URL" -O rom.zip
         else
-          echo "⚡ Direct link detected!"
-          aria2c -x 16 -s 16 -o "$OUTPUT" "$URL"
-        fi
-        
-        # VERIFIKASI UKURAN FILE (PENTING!)
-        FILE_SIZE=$(stat -c%s "$OUTPUT")
-        if [ $FILE_SIZE -lt 1000000 ]; then
-          echo "❌ ERROR: File terlalu kecil ($FILE_SIZE bytes). Ini kemungkinan halaman HTML, bukan ROM."
-          echo "Tips: Pastikan link GDrive sudah 'Anyone with the link can view'."
-          exit 1
+          aria2c -x 16 -s 16 -o rom.zip "$URL"
         fi
 
     - name: Extract ROM
       run: |
-        mkdir -p output_folder
-        # Cek tipe file, jika zip gunakan 7z
-        7z x "rom.zip" -ooutput_folder/
-        rm "rom.zip"
+        mkdir -p dump_folder
+        7z x rom.zip -odump_folder/
+        rm rom.zip
 
-    - name: Push to Hugging Face
+    - name: Upload using Python (Fast & Robust)
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        USER: ${{ inputs.hf_username }}
-        REPO: ${{ inputs.hf_repo }}
-        FOLDER: ${{ inputs.rom_name }}
       run: |
-        # Setup Git Global
-        git config --global user.email "action@github.com"
-        git config --global user.name "GitHub Action"
-        
-        # Clone Repo Hugging Face
-        git clone https://$USER:$HF_TOKEN@huggingface.co/datasets/$USER/$REPO hf_repo
-        
-        # Pindahkan file
-        mkdir -p hf_repo/$FOLDER
-        mv output_folder/* hf_repo/$FOLDER/
-        
-        cd hf_repo
-        
-        # LFS Tracking untuk file-file ROM
-        git lfs track "*.img" "*.bin" "*.dat" "*.br" "*.zip" "*.tar"
-        git add .gitattributes
-        
-        # Add, Commit, Push
-        git add .
-        git commit -m "Upload extracted ROM: $FOLDER from GDrive/URL"
-        git push
+        python3 -c '
+        from huggingface_hub import HfApi
+        import os
+
+        api = HfApi()
+        token = os.getenv("HF_TOKEN")
+        repo_id = "${{ inputs.hf_repo }}"
+        folder_path = "dump_folder"
+        path_in_repo = "${{ inputs.rom_name }}"
+
+        print(f"Starting upload to {repo_id}...")
+        api.upload_folder(
+            folder_path=folder_path,
+            repo_id=repo_id,
+            repo_type="dataset",
+            path_in_repo=path_in_repo,
+            token=token
+        )
+        print("Upload finished successfully!")
+        '

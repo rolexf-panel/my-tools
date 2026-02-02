@@ -45,25 +45,21 @@ jobs:
         URL="${{ inputs.rom_url }}"
         OUTPUT="rom.zip"
         
-        echo "Checking URL type..."
-        
-        # Logika IF untuk cek apakah ini link Google Drive
         if [[ "$URL" == *"drive.google.com"* ]]; then
-          echo "✅ Google Drive link detected! Using gdown..."
-          # Menggunakan gdown untuk handle warning virus scan otomatis
-          gdown "$URL" -O "$OUTPUT"
+          echo "✅ Google Drive link detected!"
+          # Menggunakan --fuzzy agar gdown otomatis mencari ID file dari link browser
+          # Menggunakan --remaining-ok agar tidak gagal jika ada masalah koneksi sedikit
+          gdown --fuzzy "$URL" -O "$OUTPUT"
         else
-          echo "⚡ Direct link detected! Using aria2 (Fast Mode)..."
-          # Menggunakan aria2 untuk link biasa (pixeldrain direct, mediafire direct, dll)
+          echo "⚡ Direct link detected!"
           aria2c -x 16 -s 16 -o "$OUTPUT" "$URL"
         fi
         
-        # Cek apakah file berhasil terdownload
-        if [ -f "$OUTPUT" ]; then
-          echo "File downloaded successfully."
-          ls -lh "$OUTPUT"
-        else
-          echo "❌ Download failed!"
+        # VERIFIKASI UKURAN FILE (PENTING!)
+        FILE_SIZE=$(stat -c%s "$OUTPUT")
+        if [ $FILE_SIZE -lt 1000000 ]; then
+          echo "❌ ERROR: File terlalu kecil ($FILE_SIZE bytes). Ini kemungkinan halaman HTML, bukan ROM."
+          echo "Tips: Pastikan link GDrive sudah 'Anyone with the link can view'."
           exit 1
         fi
 

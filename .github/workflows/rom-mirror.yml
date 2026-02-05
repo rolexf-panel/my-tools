@@ -38,8 +38,8 @@ jobs:
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
         sudo apt-get update
         sudo apt-get install -y aria2 p7zip-full python3-pip
-        # Menambahkan mediafire-dl untuk handle link mediafire
-        pip3 install gdown huggingface_hub mediafire-dl
+        # Instal yt-dlp sebagai pengganti mediafire-dl
+        pip3 install gdown huggingface_hub yt-dlp
 
     - name: Smart Download
       run: |
@@ -48,17 +48,29 @@ jobs:
         OUT="rom.$EXT"
 
         if [[ "$URL" == *"drive.google.com"* ]]; then
+          echo "Mendeteksi Google Drive..."
           gdown --fuzzy "$URL" -O "$OUT"
+        
         elif [[ "$URL" == *"mediafire.com"* ]]; then
-          mediafire-dl "$URL" -o "$OUT"
+          echo "Mendeteksi Mediafire (via yt-dlp)..."
+          # yt-dlp otomatis menangani direct link Mediafire
+          yt-dlp -o "$OUT" "$URL"
+        
         else
+          echo "Mendeteksi Direct Link (aria2c)..."
           aria2c -x 16 -s 16 -o "$OUT" "$URL"
         fi
 
     - name: Extract ROM
       run: |
         mkdir -p dump_folder
-        # -y untuk auto-confirm, -p untuk password
+        # Cek apakah file berhasil didownload sebelum ekstrak
+        if [ ! -f "rom.${{ inputs.file_type }}" ]; then
+          echo "Error: File rom.${{ inputs.file_type }} tidak ditemukan! Download gagal."
+          exit 1
+        fi
+        
+        echo "Mengekstrak..."
         7z x "rom.${{ inputs.file_type }}" -p"${{ inputs.password }}" -odump_folder/ -y
         rm "rom.${{ inputs.file_type }}"
 
@@ -81,12 +93,16 @@ jobs:
             exit(1)
 
         print(f"Starting upload to {repo_id}...")
-        api.upload_folder(
-            folder_path=folder_path,
-            repo_id=repo_id,
-            repo_type="dataset",
-            path_in_repo=path_in_repo,
-            token=token
-        )
-        print("Upload finished successfully!")
+        try:
+            api.upload_folder(
+                folder_path=folder_path,
+                repo_id=repo_id,
+                repo_type="dataset",
+                path_in_repo=path_in_repo,
+                token=token
+            )
+            print("Upload finished successfully!")
+        except Exception as e:
+            print(f"Error during upload: {e}")
+            exit(1)
         '

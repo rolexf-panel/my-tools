@@ -12,6 +12,14 @@ on:
       hf_repo:
         description: 'Repo ID (contoh: username/my-dataset)'
         required: true
+      file_type:
+        description: 'Tipe File Sumber'
+        type: choice
+        required: true
+        options:
+          - zip
+          - rar
+        default: zip
 
 jobs:
   upload-to-hf:
@@ -21,7 +29,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Free Disk Space
+    - name: Setup Dependencies
       run: |
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
         sudo apt-get update
@@ -31,17 +39,20 @@ jobs:
     - name: Smart Download
       run: |
         URL="${{ inputs.rom_url }}"
+        EXT="${{ inputs.file_type }}"
+        # Output file disesuaikan dengan tipe yang dipilih
         if [[ "$URL" == *"drive.google.com"* ]]; then
-          gdown --fuzzy "$URL" -O rom.zip
+          gdown --fuzzy "$URL" -O "rom.$EXT"
         else
-          aria2c -x 16 -s 16 -o rom.zip "$URL"
+          aria2c -x 16 -s 16 -o "rom.$EXT" "$URL"
         fi
 
     - name: Extract ROM
       run: |
         mkdir -p dump_folder
-        7z x rom.zip -odump_folder/
-        rm rom.zip
+        # 7z secara otomatis mengenali format zip maupun rar
+        7z x "rom.${{ inputs.file_type }}" -odump_folder/
+        rm "rom.${{ inputs.file_type }}"
 
     - name: Upload using Python (Fast & Robust)
       env:

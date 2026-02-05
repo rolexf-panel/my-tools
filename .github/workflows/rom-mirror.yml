@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'Link ROM (GDrive atau Direct Link)'
+        description: 'Link ROM (GDrive, Mediafire, atau Direct Link)'
         required: true
       rom_name:
         description: 'Nama Folder di HF (misal: A50-Dump)'
@@ -38,23 +38,27 @@ jobs:
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
         sudo apt-get update
         sudo apt-get install -y aria2 p7zip-full python3-pip
-        pip3 install gdown huggingface_hub
+        # Menambahkan mediafire-dl untuk handle link mediafire
+        pip3 install gdown huggingface_hub mediafire-dl
 
     - name: Smart Download
       run: |
         URL="${{ inputs.rom_url }}"
         EXT="${{ inputs.file_type }}"
+        OUT="rom.$EXT"
+
         if [[ "$URL" == *"drive.google.com"* ]]; then
-          gdown --fuzzy "$URL" -O "rom.$EXT"
+          gdown --fuzzy "$URL" -O "$OUT"
+        elif [[ "$URL" == *"mediafire.com"* ]]; then
+          mediafire-dl "$URL" -o "$OUT"
         else
-          aria2c -x 16 -s 16 -o "rom.$EXT" "$URL"
+          aria2c -x 16 -s 16 -o "$OUT" "$URL"
         fi
 
     - name: Extract ROM
       run: |
         mkdir -p dump_folder
-        # Menggunakan flag -p untuk password. 
-        # Jika password kosong, 7z tetap akan berjalan normal.
+        # -y untuk auto-confirm, -p untuk password
         7z x "rom.${{ inputs.file_type }}" -p"${{ inputs.password }}" -odump_folder/ -y
         rm "rom.${{ inputs.file_type }}"
 
@@ -71,6 +75,10 @@ jobs:
         repo_id = "${{ inputs.hf_repo }}"
         folder_path = "dump_folder"
         path_in_repo = "${{ inputs.rom_name }}"
+
+        if not token:
+            print("Error: HF_TOKEN is missing!")
+            exit(1)
 
         print(f"Starting upload to {repo_id}...")
         api.upload_folder(

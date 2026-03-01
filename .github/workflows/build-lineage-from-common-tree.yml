@@ -217,7 +217,7 @@ jobs:
           path: ${{ env.WORK_DIR }}/device/${{ env.VENDOR }}/${{ env.SOC }}-common
           key: tadiphone-common-${{ github.run_id }}
 
-      # PERBAIKAN: Line 263 area - Gunakan file write yang lebih aman
+      # PERBAIKAN: Line 251 area - Gunakan file write yang lebih aman
       - name: Generate Device Tree for LJ6
         run: |
           cd ${{ env.WORK_DIR }}
@@ -342,7 +342,7 @@ FSTABEOF
 # Mediatek MT6789 fstab for TECNO-LJ6
 system           /system        ext4      ro             wait,slotselect,logical
 vendor           /vendor        ext4      ro             wait,slotselect,logical
-product          /product       ext4      ro             wait,slotselect,logical
+product          /product       ext4      ro             wait,slotselectselect,logical
 system_ext       /system_ext    ext4      ro             wait,slotselect,logical
 
 /dev/block/by-name/metadata    /metadata    ext4    noatime,nosuid,nodev,discard    wait,check,formattable,first_stage_mount

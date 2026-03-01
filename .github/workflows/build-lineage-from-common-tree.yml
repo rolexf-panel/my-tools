@@ -46,7 +46,7 @@ env:
 jobs:
   build-lineageos:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360 # Build Android memakan waktu berjam-jam
+    timeout-minutes: 360
     
     steps:
       - name: Maximize Build Space
@@ -63,6 +63,12 @@ jobs:
           df -h
           echo "::endgroup::"
 
+      - name: Runner Cleanup Action
+        uses: mathio/gha-cleanup@v1
+
+      - name: GitHub Workflow Cleaner Action
+        uses: rokibhasansagar/slimhub_actions@v25.42.5
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -75,12 +81,11 @@ jobs:
           sudo apt-get install -y -qq \
             git-core gnupg flex bison build-essential zip curl \
             zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
-            libncurses5 lib32ncurses5-dev x11proto-core-dev \
+            libncurses5 libncurses5-dev lib32ncurses5-dev x11proto-core-dev \
             libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils \
             xsltproc unzip fontconfig libarchive-tools brotli \
-            repo ccache python3 python3-pip jq bc git-lfs \
-            android-tools-fsutils simg2img img2simg \
-            p7zip-full p7zip-rar
+            ccache python3 python3-pip jq bc git-lfs \
+            simg2img p7zip-full
           echo "::endgroup::"
 
       - name: Setup Git Identity & Repo Tool
@@ -217,7 +222,7 @@ jobs:
           /dev/block/by-name/recovery  /recovery    emmc    defaults    first_stage_mount,nofail
           FSTABEOF
           
-          # Write fstab.mt6789 (Diperbaiki: slotselectselect -> slotselect)
+          # Write fstab.mt6789
           cat > $DEVICE_DIR/configs/fstab.mt6789 << 'CFSTABEOF'
           system           /system        ext4      ro             wait,slotselect,logical
           vendor           /vendor        ext4      ro             wait,slotselect,logical

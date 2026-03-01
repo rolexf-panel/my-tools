@@ -1,0 +1,48 @@
+name: MTK BPF Patcher
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  patch-boot-image:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip wget
+      
+      - name: Install mtk-bpf-patcher
+        run: |
+          pip3 install --upgrade git+https://github.com/R0rt1z2/mtk-bpf-patcher
+      
+      - name: Download boot.img
+        run: |
+          wget -O boot.img "https://huggingface.co/datasets/fab1x/tecno-lj6-dump/resolve/main/TECNO-LJ6-DUMP/boot.img?download=true"
+          ls -lh boot.img
+      
+      - name: Run MTK BPF Patcher
+        run: |
+          mtk-bpf-patcher boot.img boot-patched.img
+          ls -lh boot-patched.img
+      
+      - name: Upload patched boot image to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-patched-img
+          path: boot-patched.img
+          retention-days: 30
+          if-no-files-found: error

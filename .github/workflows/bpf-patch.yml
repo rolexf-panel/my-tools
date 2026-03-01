@@ -1,48 +1,121 @@
-name: MTK BPF Patcher
+name: MTK Kernel 5.10 BPF Fix Attempt
 
 on:
-  workflow_dispatch:  # Manual trigger
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      patch_method:
+        description: 'Patch method to attempt'
+        required: true
+        default: 'analyze_only'
+        type: choice
+        options:
+          - analyze_only
+          - attempt_generic_patch
+          - attempt_manual_hex_patch
 
 jobs:
-  patch-boot-image:
+  fix-kernel:
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
+      - name: Setup environment
         run: |
           sudo apt update
-          sudo apt install -y python3-pip wget
+          sudo apt install -y python3-pip wget xxd binutils-aarch64-linux-gnu hexedit python3
       
-      - name: Install mtk-bpf-patcher
+      - name: Download MagiskBoot
         run: |
-          pip3 install --upgrade git+https://github.com/R0rt1z2/mtk-bpf-patcher
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -q Magisk-v27.0.apk -d magisk/
+          cp magisk/lib/arm64-v8a/libmagiskboot.so ./magiskboot
+          chmod +x magiskboot
       
       - name: Download boot.img
         run: |
           wget -O boot.img "https://huggingface.co/datasets/fab1x/tecno-lj6-dump/resolve/main/TECNO-LJ6-DUMP/boot.img?download=true"
-          ls -lh boot.img
       
-      - name: Run MTK BPF Patcher
+      - name: Unpack boot image
+        run: ./magiskboot unpack boot.img
+      
+      - name: Analyze kernel structure
+        id: analyze
         run: |
-          mtk-bpf-patcher boot.img boot-patched.img
-          ls -lh boot-patched.img
+          echo "kernel_size=$(stat -c%s kernel)" >> $GITHUB_OUTPUT
+          echo "kernel_md5=$(md5sum kernel | cut -d' ' -f1)" >> $GITHUB_OUTPUT
       
-      - name: Upload patched boot image to artifacts
+      - name: Attempt generic BPF patch (experimental)
+        if: github.event.inputs.patch_method == 'attempt_generic_patch'
+        run: |
+          echo "Attempting to find and patch common BPF null check patterns..."
+          
+          # Cari pattern cbz/cbnz yang mungkin terkait BPF null check
+          # Ini adalah eksperimen dan mungkin tidak berhasil
+          
+          # Backup kernel
+          cp kernel kernel.backup
+          
+          # Coba cari dan patch pattern umum (SANGAT BERISIKO!)
+          # Pattern: cbz x0, <addr> -> nop (1F 20 03 D5)
+          # atau: cbnz x0, <addr> -> nop
+          
+          echo "WARNING: Generic patching is experimental and may brick your device!"
+          echo "Please analyze the kernel manually before attempting this."
+          
+          # Untuk sekarang, hanya log pattern yang ditemukan
+          xxd kernel | grep -E "cbz|cbnz" | head -10 || true
+      
+      - name: Manual hex patch (requires pre-defined offset)
+        if: github.event.inputs.patch_method == 'attempt_manual_hex_patch'
+        run: |
+          echo "Manual patching requires known offset from IDA/Ghidra analysis"
+          echo "Please provide the offset and patch bytes if you have them"
+          
+          # Contoh jika Anda sudah tahu offset (ganti dengan nilai yang benar)
+          # printf '\x1f\x20\x03\xd5' | dd of=kernel bs=1 seek=$((0xOFFSET)) count=4 conv=notrunc
+      
+      - name: Repack boot image (if patched)
+        if: github.event.inputs.patch_method != 'analyze_only'
+        run: |
+          if [ -f kernel.patched ]; then
+            cp kernel.patched kernel
+            ./magiskboot repack boot.img boot-patched.img
+            echo "Patched boot image created"
+          else
+            echo "No patched kernel found, skipping repack"
+          fi
+      
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: boot-patched-img
-          path: boot-patched.img
+          name: mtk-kernel-5.10-analysis
+          path: |
+            kernel
+            kernel.backup
+            boot.img
+            ramdisk.cpio
+            dtb
+            magiskboot
+            boot-patched.img
+          if-no-files-found: ignore
           retention-days: 30
-          if-no-files-found: error
+      
+      - name: Summary
+        run: |
+          echo "=== WORKFLOW SUMMARY ==="
+          echo "Kernel size: ${{ steps.analyze.outputs.kernel_size }} bytes"
+          echo "Kernel MD5: ${{ steps.analyze.outputs.kernel_md5 }}"
+          echo ""
+          echo "⚠️ IMPORTANT NOTES FOR KERNEL 5.10:"
+          echo "1. mtk-bpf-patcher TIDAK berfungsi di kernel 5.10"
+          echo "2. Hex pattern berbeda dari kernel 4.14/4.19"
+          echo "3. Diperlukan reverse engineering manual dengan IDA Pro/Ghidra"
+          echo ""
+          echo "Langkah yang direkomendasikan:"
+          echo "1. Download artefak 'mtk-kernel-5.10-analysis'"
+          echo "2. Analisis kernel dengan IDA Pro/Ghidra"
+          echo "3. Cari fungsi bpf_get_local_storage atau terkait"
+          echo "4. Patch null check yang bermasalah"
+          echo "5. Repack dan test"

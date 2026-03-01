@@ -1,0 +1,747 @@
+name: Build LineageOS for Tecno Pova 7 4G (TECNO-LJ6)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: 'Build Target'
+        required: true
+        default: 'bacon'
+        type: choice
+        options:
+          - bacon
+          - bootimage
+          - recoveryimage
+          - systemimage
+      clean_build:
+        description: 'Clean Build (tanpa cache)'
+        required: false
+        default: false
+        type: boolean
+      upload_artifacts:
+        description: 'Upload Artifacts'
+        required: false
+        default: true
+        type: boolean
+  
+  schedule:
+    - cron: '0 0 * * 0'
+  
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+env:
+  DEVICE_CODENAME: LJ6
+  VENDOR: tecno
+  SOC: mt6789
+  LINEAGE_BRANCH: lineage-22.1
+  WORK_DIR: ${{ github.workspace }}/lineage
+  CCACHE_SIZE: 50G
+  # Tadiphone Common Tree (Git LFS repo)
+  TADIPHONE_COMMON_URL: "https://dumps.tadiphone.dev/dumps/alps/mgvi_64_nfc_armv82.git"
+  # Device tree reference (TWRP)
+  DEVICE_TREE_URL: "https://github.com/transsion-mt6789-recovery/twrp-device_tecno_TECNO-LJ6.git"
+
+jobs:
+  # ============================================================================
+  # JOB 1: Setup Environment
+  # ============================================================================
+  setup:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      work-dir: ${{ env.WORK_DIR }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Dependencies
+        run: |
+          echo "::group::Installing Dependencies"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git-core gnupg flex bison build-essential zip curl \
+            zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
+            libncurses5 lib32ncurses5-dev x11proto-core-dev \
+            libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils \
+            xsltproc unzip fontconfig libarchive-tools brotli \
+            repo ccache python3 python3-pip jq bc git-lfs \
+            android-tools-fsutils simg2img img2simg \
+            p7zip-full p7zip-rar
+          echo "::endgroup::"
+
+      - name: Setup Git Identity
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git config --global color.ui auto
+          git lfs install
+
+      - name: Setup Repo Tool
+        run: |
+          mkdir -p $HOME/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > $HOME/bin/repo
+          chmod a+x $HOME/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Cache Repo Tool
+        uses: actions/cache@v3
+        with:
+          path: $HOME/bin/repo
+          key: repo-tool
+
+  # ============================================================================
+  # JOB 2: Sync LineageOS Source
+  # ============================================================================
+  sync-lineage:
+    runs-on: ubuntu-22.04
+    needs: setup
+    timeout-minutes: 120
+    
+    steps:
+      - name: Restore Repo Tool
+        uses: actions/cache@v3
+        with:
+          path: $HOME/bin/repo
+          key: repo-tool
+
+      - name: Initialize Repo
+        run: |
+          mkdir -p ${{ env.WORK_DIR }}
+          cd ${{ env.WORK_DIR }}
+          
+          if [ ! -d ".repo" ]; then
+            echo "::group::Initializing Repo"
+            repo init -u https://github.com/LineageOS/android.git -b ${{ env.LINEAGE_BRANCH }} --git-lfs --depth=1
+            echo "::endgroup::"
+          else
+            echo "Repo already initialized"
+          fi
+
+      - name: Sync Source
+        run: |
+          cd ${{ env.WORK_DIR }}
+          echo "::group::Syncing LineageOS Source"
+          
+          # Sync dengan retry
+          for i in {1..3}; do
+            echo "Sync attempt $i..."
+            if repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch; then
+              echo "Sync successful"
+              break
+            else
+              echo "Sync failed, retrying in 30s..."
+              sleep 30
+            fi
+          done
+          echo "::endgroup::"
+
+      - name: Cache Source
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}
+          key: lineage-source-${{ github.run_id }}
+          restore-keys: |
+            lineage-source-
+
+  # ============================================================================
+  # JOB 3: Clone Tadiphone Common Tree
+  # ============================================================================
+  clone-common:
+    runs-on: ubuntu-22.04
+    needs: [setup, sync-lineage]
+    timeout-minutes: 30
+    
+    steps:
+      - name: Restore Lineage Source
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}
+          key: lineage-source-${{ github.run_id }}
+
+      - name: Install Git LFS
+        run: |
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Clone Tadiphone Common Tree
+        run: |
+          cd ${{ env.WORK_DIR }}
+          mkdir -p device/${{ env.VENDOR }}
+          
+          echo "::group::Cloning Tadiphone Common Tree (mgvi_64_nfc_armv82)"
+          
+          if [ ! -d "device/${{ env.VENDOR }}/${{ env.SOC }}-common" ]; then
+            # Clone dengan git-lfs untuk file besar
+            git clone ${{ env.TADIPHONE_COMMON_URL }} device/${{ env.VENDOR }}/${{ env.SOC }}-common
+            
+            cd device/${{ env.VENDOR }}/${{ env.SOC }}-common
+            
+            # Pull LFS files
+            git lfs pull || echo "LFS pull failed, continuing..."
+            
+            echo "Common tree cloned successfully"
+            ls -la
+          else
+            echo "Common tree already exists, pulling updates..."
+            cd device/${{ env.VENDOR }}/${{ env.SOC }}-common
+            git pull || true
+          fi
+          
+          echo "::endgroup::"
+
+      - name: Analyze Common Tree Structure
+        run: |
+          cd ${{ env.WORK_DIR }}/device/${{ env.VENDOR }}/${{ env.SOC }}-common
+          
+          echo "::group::Analyzing Common Tree Structure"
+          echo "Directory structure:"
+          find . -maxdepth 3 -type f -name "*.mk" -o -name "Android.bp" -o -name "BoardConfig*" | head -20
+          
+          # Cek struktur board/platform
+          ls -la
+          
+          # Simpan struktur untuk referensi device tree
+          tree -L 3 > /tmp/common_tree_structure.txt || find . -maxdepth 3 > /tmp/common_tree_structure.txt
+          cat /tmp/common_tree_structure.txt
+          echo "::endgroup::"
+
+      - name: Cache Common Tree
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}/device/${{ env.VENDOR }}/${{ env.SOC }}-common
+          key: tadiphone-common-${{ github.run_id }}
+
+  # ============================================================================
+  # JOB 4: Generate Device Tree (LJ6)
+  # ============================================================================
+  generate-device-tree:
+    runs-on: ubuntu-22.04
+    needs: [setup, sync-lineage, clone-common]
+    timeout-minutes: 15
+    
+    steps:
+      - name: Restore Dependencies
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}
+          key: lineage-source-${{ github.run_id }}
+
+      - name: Restore Common Tree
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}/device/${{ env.VENDOR }}/${{ env.SOC }}-common
+          key: tadiphone-common-${{ github.run_id }}
+
+      - name: Generate Device Tree for LJ6
+        run: |
+          cd ${{ env.WORK_DIR }}
+          DEVICE_DIR="device/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}"
+          
+          echo "::group::Generating Device Tree for ${{ env.DEVICE_CODENAME }}"
+          mkdir -p $DEVICE_DIR/{configs,prebuilt,overlay/frameworks/base/core/res/res/values}
+          
+          # Analisis common tree untuk inherit yang tepat
+          COMMON_DIR="device/${{ env.VENDOR }}/${{ env.SOC }}-common"
+          
+          # Cari file .mk yang ada di common tree
+          COMMON_MK=$(find $COMMON_DIR -name "*.mk" | grep -E "(common|mt6789)" | head -1 || echo "")
+          if [ -z "$COMMON_MK" ]; then
+            COMMON_MK="device/${{ env.VENDOR }}/${{ env.SOC }}-common/common.mk"
+          fi
+          
+          echo "Using common makefile: $COMMON_MK"
+          
+          # AndroidProducts.mk
+          cat > $DEVICE_DIR/AndroidProducts.mk << EOF
+PRODUCT_MAKEFILES := \\
+    \$(LOCAL_DIR)/lineage_${{ env.DEVICE_CODENAME }}.mk
+
+COMMON_LUNCH_CHOICES := \\
+    lineage_${{ env.DEVICE_CODENAME }}-user \\
+    lineage_${{ env.DEVICE_CODENAME }}-userdebug \\
+    lineage_${{ env.DEVICE_CODENAME }}-eng
+EOF
+          
+          # lineage_LJ6.mk - inherit dari Tadiphone common tree
+          cat > $DEVICE_DIR/lineage_${{ env.DEVICE_CODENAME }}.mk << EOF
+# Inherit from Tadiphone MT6789 Common Tree
+\$(call inherit-product, \$(LOCAL_PATH)/../${{ env.SOC }}-common/common.mk)
+
+# Device identifiers
+PRODUCT_DEVICE := ${{ env.DEVICE_CODENAME }}
+PRODUCT_NAME := lineage_${{ env.DEVICE_CODENAME }}
+PRODUCT_BRAND := Tecno
+PRODUCT_MODEL := Tecno Pova 7 4G
+PRODUCT_MANUFACTURER := Tecno
+
+PRODUCT_GMS_CLIENTID_BASE := android-transsion
+
+# Boot animation
+TARGET_SCREEN_HEIGHT := 2460
+TARGET_SCREEN_WIDTH := 1080
+
+# Build properties
+PRODUCT_BUILD_PROP_OVERRIDES += \\
+    PRIVATE_BUILD_DESC="LJ6-GL-user 15 TP1A.220624.014 250305V1448 release-keys"
+
+BUILD_FINGERPRINT := Tecno/LJ6-GL/Tecno-LJ6:15/TP1A.220624.014/250305V1448:user/release-keys
+EOF
+          
+          # BoardConfig.mk - konfigurasi spesifik LJ6
+          cat > $DEVICE_DIR/BoardConfig.mk << EOF
+DEVICE_PATH := device/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}
+
+# Inherit from Tadiphone common tree
+-include device/${{ env.VENDOR }}/${{ env.SOC }}-common/BoardConfigCommon.mk
+
+# Device Assert
+TARGET_OTA_ASSERT_DEVICE := Tecno-${{ env.DEVICE_CODENAME }},${{ env.DEVICE_CODENAME }},LJ6-GL
+
+# Kernel - Prebuilt dari stock ROM (MT6789 tidak ada kernel source publik)
+TARGET_PREBUILT_KERNEL := \$(DEVICE_PATH)/prebuilt/kernel
+BOARD_PREBUILT_DTBOIMAGE := \$(DEVICE_PATH)/prebuilt/dtbo.img
+TARGET_PREBUILT_DTB := \$(DEVICE_PATH)/prebuilt/dtb.img
+
+# Partitions - Tecno Pova 7 4G specific
+BOARD_BOOTIMAGE_PARTITION_SIZE := 67108864
+BOARD_DTBOIMG_PARTITION_SIZE := 8388608
+BOARD_SUPER_PARTITION_SIZE := 9126805504
+BOARD_SUPER_PARTITION_GROUPS := tecno_dynamic_partitions
+BOARD_TECNO_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext vendor product
+BOARD_TECNO_DYNAMIC_PARTITIONS_SIZE := 9122611200
+
+# Recovery
+TARGET_RECOVERY_FSTAB := \$(DEVICE_PATH)/recovery.fstab
+
+# Security patch level
+VENDOR_SECURITY_PATCH := 2025-03-05
+
+# SELinux - permissive untuk initial build
+BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
+EOF
+          
+          # device.mk
+          cat > $DEVICE_DIR/device.mk << EOF
+# Inherit from Tadiphone common tree
+\$(call inherit-product, device/${{ env.VENDOR }}/${{ env.SOC }}-common/common.mk)
+
+# Local overlays
+DEVICE_PACKAGE_OVERLAYS += \$(LOCAL_PATH)/overlay
+
+# Device-specific init
+PRODUCT_PACKAGES += \\
+    init.${{ env.DEVICE_CODENAME }}.rc
+
+# Copy configurations
+PRODUCT_COPY_FILES += \\
+    \$(LOCAL_PATH)/configs/fstab.mt6789:\$(TARGET_COPY_OUT_VENDOR)/etc/fstab.mt6789 \\
+    \$(LOCAL_PATH)/configs/init.target.rc:\$(TARGET_COPY_OUT_VENDOR)/etc/init/hw/init.target.rc
+EOF
+          
+          # Buat file konfigurasi
+          cat > $DEVICE_DIR/recovery.fstab << 'EOF'
+# Android fstab file for TECNO-LJ6
+#<src>           <mnt_point>    <type>    <mnt_flags>    <fs_mgr_flags>
+/system_root     /system        ext4      ro             wait,slotselect,logical
+/vendor          /vendor        ext4      ro             wait,slotselect,logical
+/product         /product       ext4      ro             wait,slotselect,logical
+/system_ext      /system_ext    ext4      ro             wait,slotselect,logical
+
+/dev/block/by-name/metadata    /metadata    ext4    noatime,nosuid,nodev,discard    wait,check,formattable,first_stage_mount
+/dev/block/by-name/userdata    /data        f2fs    noatime,nosuid,nodev,discard,fsync_mode=nobarrier,reserve_root=32768,resgid=1065,inlinecrypt    wait,check,formattable,quota,reservedsize=128M,latemount,resize,checkpoint=fs,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption
+/dev/block/by-name/misc        /misc        emmc    defaults    defaults
+/dev/block/by-name/boot      /boot        emmc    defaults    first_stage_mount,nofail
+/dev/block/by-name/recovery  /recovery    emmc    defaults    first_stage_mount,nofail
+EOF
+          
+          cat > $DEVICE_DIR/configs/fstab.mt6789 << 'EOF'
+# Mediatek MT6789 fstab for TECNO-LJ6
+#<src>           <mnt_point>    <type>    <mnt_flags>    <fs_mgr_flags>
+system           /system        ext4      ro             wait,slotselect,logical
+vendor           /vendor        ext4      ro             wait,slotselect,logical
+product          /product       ext4      ro             wait,slotselect,logical
+system_ext       /system_ext    ext4      ro             wait,slotselect,logical
+
+/dev/block/by-name/metadata    /metadata    ext4    noatime,nosuid,nodev,discard    wait,check,formattable,first_stage_mount
+/dev/block/by-name/userdata    /data        f2fs    noatime,nosuid,nodev,discard,fsync_mode=nobarrier,reserve_root=32768,resgid=1065,inlinecrypt    wait,check,formattable,quota,reservedsize=128M,latemount,resize,checkpoint=fs,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption
+/dev/block/by-name/misc        /misc        emmc    defaults    defaults
+/dev/block/by-name/boot        /boot        emmc    defaults    first_stage_mount,nofail
+/dev/block/by-name/recovery    /recovery    emmc    defaults    first_stage_mount,nofail
+EOF
+          
+          cat > $DEVICE_DIR/configs/init.target.rc << 'EOF'
+# Device-specific init for TECNO-LJ6
+
+on early-init
+    # Device specific setup
+    
+on init
+    # Symlinks
+    
+on fs
+    mount_all /vendor/etc/fstab.mt6789 --early
+    
+on post-fs-data
+    # Post fs setup
+EOF
+          
+          cat > $DEVICE_DIR/overlay/frameworks/base/core/res/res/values/config.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="config_automatic_brightness_available">true</bool>
+    <bool name="config_wifi_dual_band_support">true</bool>
+    <bool name="config_dozeAlwaysOnDisplayAvailable">true</bool>
+    <bool name="config_dozeAlwaysOnEnabled">false</bool>
+</resources>
+EOF
+          
+          # Script helper
+          cat > $DEVICE_DIR/extract-files.sh << 'EOF'
+#!/bin/bash
+set -e
+DEVICE=LJ6
+VENDOR=tecno
+echo "Extract vendor blobs for $DEVICE"
+echo "Place stock ROM files in this directory and run extraction"
+EOF
+          chmod +x $DEVICE_DIR/extract-files.sh
+          
+          echo "Device tree generated at: $DEVICE_DIR"
+          echo "::endgroup::"
+
+      - name: Cache Device Tree
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}/device/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}
+          key: device-tree-${{ env.DEVICE_CODENAME }}-${{ github.run_id }}
+
+  # ============================================================================
+  # JOB 5: Setup Vendor Tree (Minimal)
+  # ============================================================================
+  setup-vendor:
+    runs-on: ubuntu-22.04
+    needs: [setup, sync-lineage, generate-device-tree]
+    timeout-minutes: 15
+    
+    steps:
+      - name: Restore Work Directory
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}
+          key: lineage-source-${{ github.run_id }}
+
+      - name: Create Minimal Vendor Tree
+        run: |
+          cd ${{ env.WORK_DIR }}
+          VENDOR_DIR="vendor/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}"
+          
+          echo "::group::Creating Minimal Vendor Tree"
+          mkdir -p $VENDOR_DIR
+          
+          # Android.bp
+          cat > $VENDOR_DIR/Android.bp << 'EOF'
+soong_namespace {
+}
+EOF
+          
+          # BoardConfigVendor.mk
+          cat > $VENDOR_DIR/BoardConfigVendor.mk << EOF
+VENDOR_SECURITY_PATCH := $(date +%Y-%m-%d)
+EOF
+          
+          # LJ6-vendor.mk
+          cat > $VENDOR_DIR/${{ env.DEVICE_CODENAME }}-vendor.mk << EOF
+PRODUCT_SOONG_NAMESPACES += \\
+    vendor/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}
+EOF
+          
+          # proprietary-files.txt (placeholder)
+          cat > $VENDOR_DIR/proprietary-files.txt << 'EOF'
+# Vendor blobs untuk Tecno Pova 7 4G
+# Extract dari stock ROM menggunakan extract-files.sh
+EOF
+          
+          echo "Vendor tree created at: $VENDOR_DIR"
+          echo "::endgroup::"
+
+      - name: Cache Vendor Tree
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.WORK_DIR }}/vendor/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}
+          key: vendor-tree-${{ env.DEVICE_CODENAME }}-${{ github.run_id }}
+
+  # ============================================================================
+  # JOB 6: Build ROM
+  # ============================================================================
+  build:
+    runs-on: ubuntu-22.04
+    needs: [setup, sync-lineage, clone-common, generate-device-tree, setup-vendor]
+    timeout-minutes: 360  # 6 jam maksimum
+    env:
+      BUILD_TARGET: ${{ github.event.inputs.build_target || 'bacon' }}
+    
+    steps:
+      - name: Maximize Build Space
+        run: |
+          echo "::group::Maximizing Build Space"
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -h
+          echo "::endgroup::"
+
+      - name: Restore All Caches
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{ env.WORK_DIR }}
+            ~/.ccache
+          key: build-${{ github.run_id }}-${{ github.sha }}
+          restore-keys: |
+            lineage-source-
+            tadiphone-common-
+            device-tree-
+            vendor-tree-
+
+      - name: Setup CCache
+        run: |
+          echo "::group::Setup CCache"
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          ccache -M ${{ env.CCACHE_SIZE }}
+          ccache -o compression=true
+          ccache -z
+          echo "CCache ready"
+          echo "::endgroup::"
+
+      - name: Verify Device Trees
+        run: |
+          echo "::group::Verifying Device Trees"
+          cd ${{ env.WORK_DIR }}
+          
+          echo "Common tree:"
+          ls -la device/${{ env.VENDOR }}/${{ env.SOC }}-common/ || echo "Common tree not found!"
+          
+          echo ""
+          echo "Device tree:"
+          ls -la device/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}/ || echo "Device tree not found!"
+          
+          echo ""
+          echo "Vendor tree:"
+          ls -la vendor/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}/ || echo "Vendor tree not found!"
+          echo "::endgroup::"
+
+      - name: Lunch Device
+        run: |
+          echo "::group::Lunch Device"
+          cd ${{ env.WORK_DIR }}
+          source build/envsetup.sh
+          
+          # Cek device tree valid
+          if [ ! -f "device/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}/AndroidProducts.mk" ]; then
+            echo "Error: AndroidProducts.mk not found!"
+            exit 1
+          fi
+          
+          lunch lineage_${{ env.DEVICE_CODENAME }}-userdebug || {
+            echo "Lunch failed!"
+            echo "Checking device tree structure..."
+            cat device/${{ env.VENDOR }}/${{ env.DEVICE_CODENAME }}/AndroidProducts.mk
+            exit 1
+          }
+          echo "::endgroup::"
+
+      - name: Clean Build (Optional)
+        if: github.event.inputs.clean_build == 'true'
+        run: |
+          cd ${{ env.WORK_DIR }}
+          make clean 2>/dev/null || true
+          rm -rf out/
+
+      - name: Build ${{ env.BUILD_TARGET }}
+        id: build
+        run: |
+          echo "::group::Building ${{ env.BUILD_TARGET }}"
+          cd ${{ env.WORK_DIR }}
+          source build/envsetup.sh
+          
+          BUILD_START=$(date +%s)
+          
+          # Build dengan logging
+          mka ${{ env.BUILD_TARGET }} -j$(nproc --all) 2>&1 | tee build.log || {
+            echo "Build failed!"
+            tail -200 build.log
+            exit 1
+          }
+          
+          BUILD_END=$(date +%s)
+          BUILD_DURATION=$((BUILD_END - BUILD_START))
+          
+          echo "duration=$BUILD_DURATION" >> $GITHUB_OUTPUT
+          echo "duration_mins=$((BUILD_DURATION / 60))" >> $GITHUB_OUTPUT
+          
+          echo "Build completed in $((BUILD_DURATION / 60)) minutes"
+          
+          # CCache stats
+          echo "CCache stats:"
+          ccache -s
+          
+          echo "::endgroup::"
+
+      - name: Locate Artifacts
+        id: artifacts
+        run: |
+          echo "::group::Locating Build Artifacts"
+          cd ${{ env.WORK_DIR }}
+          
+          OUT_DIR="out/target/product/${{ env.DEVICE_CODENAME }}"
+          
+          echo "Output directory contents:"
+          ls -lah $OUT_DIR/ 2>/dev/null || echo "Output directory not found"
+          
+          # Find ROM zip
+          ROM_ZIP=$(find $OUT_DIR -maxdepth 1 -name "lineage-*.zip" -type f 2>/dev/null | head -1)
+          if [ ! -z "$ROM_ZIP" ]; then
+            echo "rom_zip=$ROM_ZIP" >> $GITHUB_OUTPUT
+            echo "rom_name=$(basename $ROM_ZIP)" >> $GITHUB_OUTPUT
+            echo "Found ROM: $ROM_ZIP"
+          fi
+          
+          # Find boot.img
+          if [ -f "$OUT_DIR/boot.img" ]; then
+            echo "boot_img=$OUT_DIR/boot.img" >> $GITHUB_OUTPUT
+            echo "Found boot.img"
+          fi
+          
+          # Find recovery.img
+          if [ -f "$OUT_DIR/recovery.img" ]; then
+            echo "recovery_img=$OUT_DIR/recovery.img" >> $GITHUB_OUTPUT
+            echo "Found recovery.img"
+          fi
+          
+          # Find dtbo.img
+          if [ -f "$OUT_DIR/dtbo.img" ]; then
+            echo "dtbo_img=$OUT_DIR/dtbo.img" >> $GITHUB_OUTPUT
+          fi
+          
+          # Find vbmeta.img
+          if [ -f "$OUT_DIR/vbmeta.img" ]; then
+            echo "vbmeta_img=$OUT_DIR/vbmeta.img" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "::endgroup::"
+
+      - name: Prepare Release
+        run: |
+          mkdir -p ${{ github.workspace }}/release
+          cd ${{ env.WORK_DIR }}
+          
+          # Copy artifacts
+          if [ ! -z "${{ steps.artifacts.outputs.rom_zip }}" ]; then
+            cp "${{ steps.artifacts.outputs.rom_zip }}" ${{ github.workspace }}/release/
+            if [ -f "${{ steps.artifacts.outputs.rom_zip }}.md5sum" ]; then
+              cp "${{ steps.artifacts.outputs.rom_zip }}.md5sum" ${{ github.workspace }}/release/
+            fi
+          fi
+          
+          [ ! -z "${{ steps.artifacts.outputs.boot_img }}" ] && cp "${{ steps.artifacts.outputs.boot_img }}" ${{ github.workspace }}/release/
+          [ ! -z "${{ steps.artifacts.outputs.recovery_img }}" ] && cp "${{ steps.artifacts.outputs.recovery_img }}" ${{ github.workspace }}/release/
+          [ ! -z "${{ steps.artifacts.outputs.dtbo_img }}" ] && cp "${{ steps.artifacts.outputs.dtbo_img }}" ${{ github.workspace }}/release/
+          [ ! -z "${{ steps.artifacts.outputs.vbmeta_img }}" ] && cp "${{ steps.artifacts.outputs.vbmeta_img }}" ${{ github.workspace }}/release/
+          
+          # Build info
+          cat > ${{ github.workspace }}/release/BUILD-INFO.txt << EOF
+========================================
+LineageOS Build for Tecno Pova 7 4G
+========================================
+Device: ${{ env.DEVICE_CODENAME }} (TECNO-LJ6)
+Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+Build Target: ${{ env.BUILD_TARGET }}
+Duration: ${{ steps.build.outputs.duration_mins }} minutes
+Commit SHA: ${{ github.sha }}
+Run ID: ${{ github.run_id }}
+Workflow: ${{ github.workflow }}
+
+Files:
+$(ls -lah ${{ github.workspace }}/release/ | tail -n +4)
+
+========================================
+EOF
+          
+          echo "Release directory prepared:"
+          ls -lah ${{ github.workspace }}/release/
+
+      - name: Upload Artifacts
+        if: github.event.inputs.upload_artifacts != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineageos-${{ env.DEVICE_CODENAME }}-${{ github.run_id }}
+          path: ${{ github.workspace }}/release/*
+          retention-days: 7
+          compression-level: 6
+          if-no-files-found: error
+
+      - name: Create Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ github.workspace }}/release/*
+          name: "LineageOS for Tecno Pova 7 4G ${{ github.ref_name }}"
+          body: |
+            ## LineageOS Build for Tecno Pova 7 4G (${{ env.DEVICE_CODENAME }})
+            
+            **Build Information:**
+            - Date: ${{ github.event.head_commit.timestamp }}
+            - Target: ${{ env.BUILD_TARGET }}
+            - Duration: ${{ steps.build.outputs.duration_mins }} minutes
+            - Commit: ${{ github.sha }}
+            
+            **Downloads:**
+            - ROM: `${{ steps.artifacts.outputs.rom_name }}`
+            
+            **Installation:**
+            1. Download ROM zip
+            2. Boot to recovery (TWRP/Lineage Recovery)
+            3. Flash ROM zip
+            4. Wipe cache/dalvik
+            5. Reboot
+            
+            **Warning:** This is an automated build. Use at your own risk.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
+  # JOB 7: Cleanup and Notify
+  # ============================================================================
+  finalize:
+    runs-on: ubuntu-22.04
+    needs: [build]
+    if: always()
+    
+    steps:
+      - name: Build Status
+        run: |
+          if [ "${{ needs.build.result }}" == "success" ]; then
+            echo "✅ Build completed successfully!"
+            echo "Download artifacts from the Actions tab"
+          else
+            echo "❌ Build failed or was cancelled"
+            echo "Check logs for errors"
+          fi
+
+      - name: Cleanup
+        run: |
+          # Cleanup tidak perlu karena runner akan di-reset
+          echo "Workflow completed"
